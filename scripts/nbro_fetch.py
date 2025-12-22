@@ -7,9 +7,10 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 try:
     import requests
@@ -38,6 +39,212 @@ def safe_name_from_url(url: str) -> str:
     base = re.sub(r"[^A-Za-z0-9_.-]+", "_", base)[:120]
     h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
     return f"{base}__{h}" if base else f"url__{h}"
+
+
+MAPVIEW_URL_DEFAULT = "http://www.rainfall.nbro.gov.lk:8080/mapforweb/all/mapview.aspx"
+MAP_SHOW_DEFAULT = "http://www.rainfall.nbro.gov.lk:8080/mapforweb/JS/map/map_show.js"
+
+
+def _parse_mm_value(text: str) -> Optional[float]:
+    value_text = text.split(":", 1)[1] if ":" in text else text
+    match = re.search(r"[-+]?[0-9]*\.?[0-9]+", value_text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _split_value(text: str) -> str:
+    if ":" not in text:
+        return text.strip()
+    return text.split(":", 1)[1].strip()
+
+
+def parse_popup(popup: str) -> dict:
+    parts = [p.strip() for p in popup.split("<br>")]
+    header_html = parts[0] if parts else ""
+    header_text = re.sub(r"<[^>]+>", "", header_html).strip()
+
+    station_id = None
+    label = header_text
+    match = re.search(r"\(([^)]+)\)\s*$", header_text)
+    if match:
+        station_id = match.group(1).strip()
+        label = header_text[: match.start()].strip()
+
+    station_name = label
+    district = None
+    if " - " in label:
+        chunks = [c.strip() for c in label.split(" - ")]
+        if len(chunks) >= 2:
+            station_name = " - ".join(chunks[:-1])
+            district = chunks[-1]
+
+    data = {
+        "id": station_id,
+        "label": label,
+        "name": station_name,
+        "district": district,
+        "disabled": False,
+        "current_mm": None,
+        "diff_mm": None,
+        "rain_24h_mm": None,
+        "last_data": None,
+        "last_update": None,
+    }
+
+    extras: list[str] = []
+    for part in parts[1:]:
+        if not part:
+            continue
+        lower = part.lower()
+        if lower.startswith("station disabled"):
+            data["disabled"] = True
+            continue
+        if lower.startswith("current"):
+            data["current_mm"] = _parse_mm_value(part)
+            continue
+        if lower.startswith("diff"):
+            data["diff_mm"] = _parse_mm_value(part)
+            continue
+        if lower.startswith("24h"):
+            data["rain_24h_mm"] = _parse_mm_value(part)
+            continue
+        if lower.startswith("last data"):
+            data["last_data"] = _split_value(part)
+            continue
+        if lower.startswith("last update on"):
+            data["last_update"] = _split_value(part)
+            continue
+        extras.append(part)
+
+    if extras:
+        data["extra"] = extras
+
+    return data
+
+
+def parse_map_show_js(text: str) -> list[dict]:
+    stations: list[dict] = []
+    marker_re = re.compile(
+        r'L\.marker\(\[(?P<lat>[^,]+),\s*(?P<lon>[^\]]+)\],\s*\{\s*icon:\s*(?P<icon>\w+)\s*\}\)\.bindPopup\("(?P<popup>.*)"\)\.addTo\(map\);'
+    )
+
+    for line in text.splitlines():
+        match = marker_re.search(line)
+        if not match:
+            continue
+        popup = match.group("popup")
+        station = parse_popup(popup)
+        try:
+            station["lat"] = float(match.group("lat").strip())
+        except ValueError:
+            station["lat"] = None
+        try:
+            station["lon"] = float(match.group("lon").strip())
+        except ValueError:
+            station["lon"] = None
+        station["icon"] = match.group("icon")
+        station["popup_html"] = popup
+        stations.append(station)
+    return stations
+
+
+def find_map_show_url(mapview_url: str, fallback_url: str) -> str:
+    try:
+        r = http_get(mapview_url)
+        if getattr(r, "status_code", 0) and r.status_code >= 400:
+            return fallback_url
+        match = re.search(r"src=[\"']([^\"']*map_show\.js[^\"']*)[\"']", r.text, re.IGNORECASE)
+        if match:
+            return urljoin(mapview_url, match.group(1))
+    except Exception:
+        return fallback_url
+    return fallback_url
+
+
+def fetch_map_show(
+    out_path: Path,
+    meta_path: Path,
+    fetched_at: str,
+    fallback_reason: Optional[str] = None,
+) -> int:
+    mapview_url = os.getenv("MAPVIEW_URL", MAPVIEW_URL_DEFAULT).strip()
+    map_show_url = os.getenv("MAP_SHOW_URL", "").strip()
+    if not map_show_url:
+        map_show_url = find_map_show_url(mapview_url, MAP_SHOW_DEFAULT)
+
+    r = http_get(map_show_url)
+    if getattr(r, "status_code", 0) and r.status_code >= 400:
+        error = f"Map JS fetch failed (status {r.status_code})"
+        write_json(
+            out_path,
+            {"fetched_at": fetched_at, "error": error, "source_url": map_show_url, "fallback_reason": fallback_reason},
+        )
+        write_json(
+            meta_path,
+            {
+                "fetched_at": fetched_at,
+                "mode": "map_show_js",
+                "source_url": map_show_url,
+                "mapview_url": mapview_url,
+                "status": r.status_code,
+                "error": error,
+                "fallback_reason": fallback_reason,
+            },
+        )
+        print(error)
+        return 1
+
+    stations = parse_map_show_js(r.text)
+    if not stations:
+        error = "No stations parsed from map_show.js"
+        write_json(
+            out_path,
+            {"fetched_at": fetched_at, "error": error, "source_url": map_show_url, "fallback_reason": fallback_reason},
+        )
+        write_json(
+            meta_path,
+            {
+                "fetched_at": fetched_at,
+                "mode": "map_show_js",
+                "source_url": map_show_url,
+                "mapview_url": mapview_url,
+                "status": r.status_code,
+                "error": error,
+                "fallback_reason": fallback_reason,
+            },
+        )
+        print(error)
+        return 1
+
+    payload = {
+        "fetched_at": fetched_at,
+        "mode": "map_show_js",
+        "source_url": map_show_url,
+        "count": len(stations),
+        "stations": stations,
+    }
+    if fallback_reason:
+        payload["fallback_reason"] = fallback_reason
+
+    write_json(out_path, payload)
+    write_json(
+        meta_path,
+        {
+            "fetched_at": fetched_at,
+            "mode": "map_show_js",
+            "source_url": map_show_url,
+            "mapview_url": mapview_url,
+            "status": r.status_code,
+            "count": len(stations),
+            "fallback_reason": fallback_reason,
+        },
+    )
+    print(f"Wrote {out_path} with {len(stations)} stations (map_show.js).")
+    return 0
 
 
 def load_har_candidates(har_path: Path) -> list[str]:
@@ -190,18 +397,12 @@ def main():
         try:
             urls = load_har_candidates(args.har)
         except ValueError as ex:
-            write_json(args.out, {"fetched_at": fetched_at, "error": str(ex)})
-            write_json(
-                meta_path,
-                {"fetched_at": fetched_at, "mode": "har_candidates", "count": 0, "error": str(ex)},
-            )
             print(str(ex))
-            return 1
+            return fetch_map_show(args.out, meta_path, fetched_at, fallback_reason=str(ex))
         if not urls:
-            write_json(args.out, {"fetched_at": fetched_at, "error": "No candidate endpoints found in HAR"})
-            write_json(meta_path, {"fetched_at": fetched_at, "mode": "har_candidates", "count": 0})
-            print("No candidates found; wrote error JSON. Add a better HAR file.")
-            return 0
+            reason = "No candidate endpoints found in HAR"
+            print("No candidates found; falling back to map_show.js.")
+            return fetch_map_show(args.out, meta_path, fetched_at, fallback_reason=reason)
 
         sources = []
         combined = {"fetched_at": fetched_at, "sources": []}

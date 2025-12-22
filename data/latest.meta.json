@@ -1,0 +1,9 @@
+{
+  "fetched_at": "2025-12-22T11:39:14+00:00",
+  "mode": "map_show_js",
+  "source_url": "http://www.rainfall.nbro.gov.lk:8080/mapforweb/JS/map/map_show.js",
+  "mapview_url": "http://www.rainfall.nbro.gov.lk:8080/mapforweb/all/mapview.aspx",
+  "status": 200,
+  "count": 251,
+  "fallback_reason": "HAR file is empty: har/nbro.har"
+}
