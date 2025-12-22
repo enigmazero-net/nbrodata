@@ -1,0 +1,51 @@
+name: NBRO fetch (every 10 mins)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nbro-fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Optional: If you later identify the "one true endpoint", set PRIMARY_URL here.
+      # env:
+      #   PRIMARY_URL: "http://www.rainfall.nbro.gov.lk:8080/......"
+      - name: Fetch data
+        run: |
+          python scripts/nbro_fetch.py fetch --har har/nbro.har --out data/latest.json
+
+      - name: Commit & push if changed
+        run: |
+          if git status --porcelain | grep -qE 'data/latest\.json|data/latest\.meta\.json'; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/latest.json data/latest.meta.json
+            git commit -m "chore: update NBRO data"
+            git push
+          else
+            echo "No changes to commit."
+          fi

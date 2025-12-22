@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "NBRO: Fetch latest data (HAR)",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "scripts/nbro_fetch.py",
+        "fetch",
+        "--har",
+        "har/nbro.har",
+        "--out",
+        "data/latest.json"
+      ],
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "NBRO: List HAR candidates",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "scripts/nbro_fetch.py",
+        "list",
+        "--har",
+        "har/nbro.har"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

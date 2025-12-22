@@ -1,0 +1,7 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Optional: if you later add raw dumps
+data/raw/
