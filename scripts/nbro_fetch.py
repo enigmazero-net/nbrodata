@@ -41,7 +41,18 @@ def safe_name_from_url(url: str) -> str:
 
 
 def load_har_candidates(har_path: Path) -> list[str]:
-    data = json.loads(har_path.read_text(encoding="utf-8"))
+    try:
+        text = har_path.read_text(encoding="utf-8")
+    except FileNotFoundError as ex:
+        raise ValueError(f"HAR not found: {har_path}") from ex
+
+    if not text.strip():
+        raise ValueError(f"HAR file is empty: {har_path}")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as ex:
+        raise ValueError(f"Invalid HAR JSON in {har_path}: {ex}") from ex
     entries = data.get("log", {}).get("entries", [])
     urls = []
 
@@ -130,7 +141,11 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "list":
-        urls = load_har_candidates(args.har)
+        try:
+            urls = load_har_candidates(args.har)
+        except ValueError as ex:
+            print(str(ex))
+            return 1
         if not urls:
             print("No JSON candidates found in HAR. (Try exporting HAR with 'Save all as HAR' including content.)")
             return 1
@@ -172,7 +187,16 @@ def main():
             return 0
 
         # Otherwise: fetch all candidates and write a combined latest.json (safe default)
-        urls = load_har_candidates(args.har)
+        try:
+            urls = load_har_candidates(args.har)
+        except ValueError as ex:
+            write_json(args.out, {"fetched_at": fetched_at, "error": str(ex)})
+            write_json(
+                meta_path,
+                {"fetched_at": fetched_at, "mode": "har_candidates", "count": 0, "error": str(ex)},
+            )
+            print(str(ex))
+            return 1
         if not urls:
             write_json(args.out, {"fetched_at": fetched_at, "error": "No candidate endpoints found in HAR"})
             write_json(meta_path, {"fetched_at": fetched_at, "mode": "har_candidates", "count": 0})
