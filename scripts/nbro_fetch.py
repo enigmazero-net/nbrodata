@@ -7,9 +7,25 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
+
+class SimpleResponse:
+    def __init__(self, status_code: int, headers: dict[str, str], text: str, url: str) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self.text = text
+        self.url = url
+
+    def json(self):
+        return json.loads(self.text)
 
 
 def utc_now_iso() -> str:
@@ -69,14 +85,30 @@ def load_har_candidates(har_path: Path) -> list[str]:
     return out
 
 
-def http_get(url: str, timeout: int = 30) -> requests.Response:
+def http_get(url: str, timeout: int = 30):
     # Use headers similar to browser to reduce 403 chance
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; nbrodata-bot/1.0)",
         "Accept": "application/json,text/plain,*/*",
         "Referer": "http://www.rainfall.nbro.gov.lk/web/",
     }
-    return requests.get(url, headers=headers, timeout=timeout)
+    if requests is not None:
+        return requests.get(url, headers=headers, timeout=timeout)
+
+    req = Request(url, headers=headers)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            charset = resp.headers.get_content_charset() or "utf-8"
+            text = raw.decode(charset, errors="replace")
+            return SimpleResponse(resp.status, dict(resp.headers.items()), text, url)
+    except HTTPError as ex:
+        raw = ex.read() if hasattr(ex, "read") else b""
+        charset = ex.headers.get_content_charset() or "utf-8"
+        text = raw.decode(charset, errors="replace") if raw else ""
+        return SimpleResponse(ex.code, dict(ex.headers.items()), text, url)
+    except URLError:
+        raise
 
 
 def write_json(path: Path, obj) -> None:
